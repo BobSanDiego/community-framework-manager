@@ -1,11 +1,20 @@
-# WordPress generated/local files
+# Ignore WordPress core
+public/*
+!public/wp-content/
+public/wp-content/*
+!public/wp-content/plugins/
+public/wp-content/plugins/*
+!public/wp-content/plugins/community-framework-manager/
+
+# Ignore generated/local WP content
 public/wp-config.php
 public/wp-content/uploads/
 public/wp-content/cache/
 public/wp-content/upgrade/
 public/wp-content/debug.log
 
-# DDEV local/runtime
+# Keep DDEV config
+!.ddev/
 .ddev/.global_commands/
 .ddev/.homeadditions/
 .ddev/.ssh-auth-compose.*
