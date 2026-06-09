@@ -1,0 +1,17 @@
+# WordPress generated/local files
+public/wp-config.php
+public/wp-content/uploads/
+public/wp-content/cache/
+public/wp-content/upgrade/
+public/wp-content/debug.log
+
+# DDEV local/runtime
+.ddev/.global_commands/
+.ddev/.homeadditions/
+.ddev/.ssh-auth-compose.*
+.ddev/docker-compose.*_built.yaml
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
