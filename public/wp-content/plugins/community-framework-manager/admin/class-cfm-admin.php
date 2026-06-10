@@ -733,6 +733,11 @@ class CFM_Admin
       return;
     }
 
+    if ($action === 'compiled_debug') {
+      self::render_compiled_debug_page();
+      return;
+    }
+
     global $wpdb;
 
     $frameworks = $wpdb->get_results(
@@ -924,6 +929,21 @@ class CFM_Admin
         ]
       )
     );
+  }
+
+  private static function compiled_debug_url(int $framework_id, string $term_uuid = ''): string
+  {
+    $args = [
+      'page' => 'cfm-frameworks',
+      'action' => 'compiled_debug',
+      'framework_id' => $framework_id,
+    ];
+
+    if ($term_uuid !== '') {
+      $args['term_uuid'] = $term_uuid;
+    }
+
+    return admin_url('admin.php?' . http_build_query($args));
   }
 
   public static function render_versions_page(): void
@@ -1458,6 +1478,185 @@ class CFM_Admin
   <?php
   }
 
+  public static function render_compiled_debug_page(): void
+  {
+    if (!current_user_can('manage_options')) {
+      wp_die('You do not have permission to access this page.');
+    }
+
+    $framework_id = isset($_GET['framework_id'])
+      ? absint($_GET['framework_id'])
+      : 0;
+
+    $term_uuid = isset($_GET['term_uuid'])
+      ? sanitize_text_field(wp_unslash($_GET['term_uuid']))
+      : '';
+
+    $framework = CFM_Framework_Repository::get_framework($framework_id);
+
+    if (!$framework) {
+      wp_die('Framework not found.');
+    }
+
+    $active_version = CFM_Framework_Repository::get_active_version((int) $framework->id);
+    $terms = $active_version
+      ? CFM_Framework_Repository::get_compiled_terms((int) $framework->id, (int) $active_version->id)
+      : [];
+
+    $selected_term = null;
+    $ancestors = [];
+    $descendants = [];
+    $siblings = [];
+
+    if ($term_uuid !== '' && $active_version) {
+      $selected_term = CFM_Framework_Repository::get_term_by_uuid((int) $framework->id, $term_uuid, (int) $active_version->id);
+
+      if ($selected_term) {
+        $ancestor_uuids = CFM_Framework_Repository::get_ancestor_uuids((int) $framework->id, $term_uuid, (int) $active_version->id, false);
+        $descendant_uuids = CFM_Framework_Repository::get_descendant_uuids((int) $framework->id, $term_uuid, (int) $active_version->id, false);
+
+        $ancestors = CFM_Framework_Repository::get_terms_by_uuids((int) $framework->id, $ancestor_uuids, (int) $active_version->id);
+        $descendants = CFM_Framework_Repository::get_terms_by_uuids((int) $framework->id, $descendant_uuids, (int) $active_version->id);
+        $siblings = CFM_Framework_Repository::get_sibling_terms((int) $framework->id, $term_uuid, (int) $active_version->id, false);
+      }
+    }
+
+  ?>
+    <div class="wrap">
+      <h1>Compiled Query Debug: <?php echo esc_html($framework->name); ?></h1>
+
+      <p>
+        <a href="<?php echo esc_url(admin_url('admin.php?page=cfm-frameworks&action=edit&framework_id=' . (int) $framework->id)); ?>">
+          ← Back to Edit Framework
+        </a>
+      </p>
+
+      <?php if (!$active_version) : ?>
+        <div class="notice notice-warning">
+          <p>No active version exists.</p>
+        </div>
+      <?php elseif (empty($terms)) : ?>
+        <div class="notice notice-warning">
+          <p>No compiled terms found. Compile the active version first.</p>
+        </div>
+      <?php endif; ?>
+
+      <?php if ($active_version) : ?>
+        <table class="widefat striped" style="max-width: 760px;">
+          <tbody>
+            <tr>
+              <th style="width: 180px;">Framework Slug</th>
+              <td><code><?php echo esc_html($framework->slug); ?></code></td>
+            </tr>
+            <tr>
+              <th>Active Version</th>
+              <td>v<?php echo esc_html((string) $active_version->version_number); ?></td>
+            </tr>
+            <tr>
+              <th>Compiled At</th>
+              <td><?php echo esc_html($active_version->compiled_at ?: 'Not compiled'); ?></td>
+            </tr>
+            <tr>
+              <th>Compiled Terms</th>
+              <td><?php echo esc_html((string) count($terms)); ?></td>
+            </tr>
+          </tbody>
+        </table>
+      <?php endif; ?>
+
+      <hr>
+
+      <h2>Pick a Term</h2>
+
+      <form method="get">
+        <input type="hidden" name="page" value="cfm-frameworks">
+        <input type="hidden" name="action" value="compiled_debug">
+        <input type="hidden" name="framework_id" value="<?php echo esc_attr($framework->id); ?>">
+
+        <select name="term_uuid" style="min-width: 360px;">
+          <option value="">Select a compiled term</option>
+          <?php foreach ($terms as $term) : ?>
+            <option value="<?php echo esc_attr($term->term_uuid); ?>" <?php selected($term_uuid, $term->term_uuid); ?>>
+              <?php echo esc_html(str_repeat('— ', max(0, (int) $term->depth)) . $term->label . ' (' . $term->slug . ')'); ?>
+            </option>
+          <?php endforeach; ?>
+        </select>
+
+        <?php submit_button('Inspect Term', 'secondary', 'submit', false); ?>
+      </form>
+
+      <?php if ($term_uuid !== '' && !$selected_term) : ?>
+        <div class="notice notice-error">
+          <p>Selected compiled term was not found.</p>
+        </div>
+      <?php endif; ?>
+
+      <?php if ($selected_term) : ?>
+        <hr>
+        <h2>Selected Term</h2>
+        <?php self::render_compiled_terms_table([$selected_term]); ?>
+
+        <h2>Ancestors</h2>
+        <?php self::render_compiled_terms_table($ancestors); ?>
+
+        <h2>Descendants</h2>
+        <?php self::render_compiled_terms_table($descendants); ?>
+
+        <h2>Siblings</h2>
+        <?php self::render_compiled_terms_table($siblings); ?>
+
+        <h2>Example Public API Calls</h2>
+        <pre style="background:#fff; border:1px solid #ccd0d4; padding:12px; max-width:900px; overflow:auto;"><code>CFM::get_term_by_slug('<?php echo esc_html($framework->slug); ?>', '<?php echo esc_html($selected_term->slug); ?>');
+CFM::get_ancestors('<?php echo esc_html($framework->slug); ?>', '<?php echo esc_html($selected_term->slug); ?>');
+CFM::get_descendants('<?php echo esc_html($framework->slug); ?>', '<?php echo esc_html($selected_term->slug); ?>');
+CFM::get_siblings('<?php echo esc_html($framework->slug); ?>', '<?php echo esc_html($selected_term->slug); ?>');</code></pre>
+      <?php endif; ?>
+
+      <hr>
+
+      <h2>All Compiled Terms</h2>
+      <?php self::render_compiled_terms_table($terms); ?>
+    </div>
+  <?php
+  }
+
+  private static function render_compiled_terms_table(array $terms): void
+  {
+    if (empty($terms)) {
+      echo '<p><em>None.</em></p>';
+      return;
+    }
+
+  ?>
+    <table class="widefat striped" style="max-width: 1100px;">
+      <thead>
+        <tr>
+          <th>Label</th>
+          <th>Slug</th>
+          <th>UUID</th>
+          <th>Parent UUID</th>
+          <th>Axis UUID</th>
+          <th>Depth</th>
+          <th>Path</th>
+        </tr>
+      </thead>
+      <tbody>
+        <?php foreach ($terms as $term) : ?>
+          <tr>
+            <td><?php echo esc_html($term->label); ?></td>
+            <td><code><?php echo esc_html($term->slug); ?></code></td>
+            <td><code><?php echo esc_html($term->term_uuid); ?></code></td>
+            <td><code><?php echo esc_html($term->parent_uuid ?: 'NULL'); ?></code></td>
+            <td><code><?php echo esc_html($term->axis_uuid ?: 'NULL'); ?></code></td>
+            <td><?php echo esc_html((string) $term->depth); ?></td>
+            <td><code><?php echo esc_html($term->path); ?></code></td>
+          </tr>
+        <?php endforeach; ?>
+      </tbody>
+    </table>
+  <?php
+  }
+
   public static function render_framework_edit_page(): void
   {
     if (!current_user_can('manage_options')) {
@@ -1670,6 +1869,7 @@ class CFM_Admin
           <input type="hidden" name="cfm_action" value="compile_active_version">
           <input type="hidden" name="framework_id" value="<?php echo esc_attr($framework->id); ?>">
           <?php submit_button('Compile Active Version', 'secondary', 'submit', false); ?>
+          <a class="button" href="<?php echo esc_url(self::compiled_debug_url((int) $framework->id)); ?>" style="margin-left: 8px;">Open Compiled Query Debug</a>
         </form>
       <?php endif; ?>
 
