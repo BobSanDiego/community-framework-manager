@@ -53,6 +53,11 @@ class CFM_Admin
       self::handle_move_term();
       return;
     }
+
+    if ($action === 'archive_term') {
+      self::handle_archive_term();
+      return;
+    }
   }
 
   private static function handle_create_framework(): void
@@ -269,6 +274,62 @@ class CFM_Admin
     exit;
   }
 
+  private static function handle_archive_term(): void
+  {
+    check_admin_referer('cfm_archive_term', 'cfm_nonce');
+
+    $framework_id = absint($_POST['framework_id'] ?? 0);
+    $term_uuid = sanitize_text_field(wp_unslash($_POST['term_uuid'] ?? ''));
+
+    if ($framework_id <= 0 || $term_uuid === '') {
+      wp_safe_redirect(
+        admin_url(
+          'admin.php?page=cfm-frameworks'
+            . '&action=edit'
+            . '&framework_id=' . $framework_id
+            . '&cfm_error=missing_archive_fields'
+        )
+      );
+      exit;
+    }
+
+    $framework = CFM_Framework_Repository::get_framework($framework_id);
+
+    if (!$framework) {
+      wp_die('Framework not found.');
+    }
+
+    $tree = self::get_framework_tree($framework);
+    $term_info = self::find_node_with_parent($tree, $term_uuid);
+
+    if (!$term_info || empty($term_info['node']) || !is_array($term_info['node'])) {
+      wp_die('Term not found.');
+    }
+
+    if (($term_info['node']['type'] ?? '') !== 'term') {
+      wp_die('Only terms can be archived. Axes cannot be archived.');
+    }
+
+    $removed_term = null;
+    $removed = self::remove_child_node_by_uuid($tree, $term_uuid, $removed_term);
+
+    if (!$removed || !is_array($removed_term)) {
+      wp_die('Unable to archive term.');
+    }
+
+    CFM_Framework_Repository::create_version($framework_id, $tree, 'active');
+
+    wp_safe_redirect(
+      admin_url(
+        'admin.php?page=cfm-frameworks'
+          . '&action=edit'
+          . '&framework_id=' . $framework_id
+          . '&cfm_term_archived=1'
+      )
+    );
+    exit;
+  }
+
   private static function find_node_with_parent(array $node, string $uuid, ?array $parent = null): ?array
   {
     if (($node['uuid'] ?? '') === $uuid) {
@@ -428,6 +489,8 @@ class CFM_Admin
       if ($show_actions && $framework_id && $term_uuid !== '' && (($term['type'] ?? '') === 'term')) {
         echo ' <span style="margin-left: 8px;">';
         echo '<a href="' . esc_url(self::move_term_url($framework_id, $term_uuid)) . '">Move</a>';
+        echo ' | ';
+        echo '<a href="' . esc_url(self::archive_term_url($framework_id, $term_uuid)) . '">Archive</a>';
         echo '</span>';
       }
 
@@ -496,6 +559,31 @@ class CFM_Admin
     }
   }
 
+  private static function count_descendant_terms(array $node): int
+  {
+    $children = $node['children'] ?? [];
+
+    if (empty($children) || !is_array($children)) {
+      return 0;
+    }
+
+    $count = 0;
+
+    foreach ($children as $child) {
+      if (!is_array($child)) {
+        continue;
+      }
+
+      if (($child['type'] ?? '') === 'term') {
+        $count++;
+      }
+
+      $count += self::count_descendant_terms($child);
+    }
+
+    return $count;
+  }
+
   public static function render_frameworks_page(): void
   {
     if (!current_user_can('manage_options')) {
@@ -524,6 +612,11 @@ class CFM_Admin
 
     if ($action === 'move_term') {
       self::render_move_term_page();
+      return;
+    }
+
+    if ($action === 'archive_term') {
+      self::render_archive_term_page();
       return;
     }
 
@@ -685,6 +778,20 @@ class CFM_Admin
         [
           'page' => 'cfm-frameworks',
           'action' => 'move_term',
+          'framework_id' => $framework_id,
+          'term_uuid' => $term_uuid,
+        ]
+      )
+    );
+  }
+
+  private static function archive_term_url(int $framework_id, string $term_uuid): string
+  {
+    return admin_url(
+      'admin.php?' . http_build_query(
+        [
+          'page' => 'cfm-frameworks',
+          'action' => 'archive_term',
           'framework_id' => $framework_id,
           'term_uuid' => $term_uuid,
         ]
@@ -886,6 +993,117 @@ class CFM_Admin
   <?php
   }
 
+  public static function render_archive_term_page(): void
+  {
+    if (!current_user_can('manage_options')) {
+      wp_die('You do not have permission to access this page.');
+    }
+
+    $framework_id = isset($_GET['framework_id'])
+      ? absint($_GET['framework_id'])
+      : 0;
+
+    $term_uuid = isset($_GET['term_uuid'])
+      ? sanitize_text_field(wp_unslash($_GET['term_uuid']))
+      : '';
+
+    $framework = CFM_Framework_Repository::get_framework($framework_id);
+
+    if (!$framework) {
+      wp_die('Framework not found.');
+    }
+
+    $tree = self::get_framework_tree($framework);
+    $term_info = self::find_node_with_parent($tree, $term_uuid);
+
+    if (!$term_info || empty($term_info['node']) || !is_array($term_info['node'])) {
+      wp_die('Term not found.');
+    }
+
+    $term = $term_info['node'];
+    $current_parent = (!empty($term_info['parent']) && is_array($term_info['parent'])) ? $term_info['parent'] : null;
+
+    if (($term['type'] ?? '') !== 'term') {
+      wp_die('Only terms can be archived.');
+    }
+
+    $children = $term['children'] ?? [];
+    $descendant_count = self::count_descendant_terms($term);
+
+  ?>
+    <div class="wrap">
+      <h1>Archive Term: <?php echo esc_html($term['label'] ?? ''); ?></h1>
+
+      <p>
+        <a href="<?php echo esc_url(
+                    admin_url(
+                      'admin.php?page=cfm-frameworks'
+                        . '&action=edit'
+                        . '&framework_id=' . (int) $framework->id
+                    )
+                  ); ?>">← Back to Edit Framework</a>
+      </p>
+
+      <div class="notice notice-warning">
+        <p>
+          This will remove the term from the current active tree by creating a new version.
+          Historical versions will still contain the term.
+        </p>
+      </div>
+
+      <table class="widefat striped" style="max-width: 900px;">
+        <tbody>
+          <tr>
+            <th style="width: 180px;">Framework</th>
+            <td><?php echo esc_html($framework->name); ?></td>
+          </tr>
+          <tr>
+            <th>Term</th>
+            <td>
+              <?php echo esc_html($term['label'] ?? ''); ?>
+              <code><?php echo esc_html($term['slug'] ?? ''); ?></code>
+            </td>
+          </tr>
+          <tr>
+            <th>UUID</th>
+            <td><code><?php echo esc_html($term['uuid'] ?? ''); ?></code></td>
+          </tr>
+          <tr>
+            <th>Current Parent</th>
+            <td>
+              <?php if ($current_parent) : ?>
+                <?php echo esc_html($current_parent['label'] ?? ''); ?>
+                <code><?php echo esc_html($current_parent['slug'] ?? ''); ?></code>
+              <?php else : ?>
+                Unknown
+              <?php endif; ?>
+            </td>
+          </tr>
+          <tr>
+            <th>Descendant Terms</th>
+            <td><?php echo esc_html((string) $descendant_count); ?></td>
+          </tr>
+        </tbody>
+      </table>
+
+      <?php if (!empty($children) && is_array($children)) : ?>
+        <h2>Archived Subtree</h2>
+        <?php self::render_terms_recursive($children); ?>
+      <?php endif; ?>
+
+      <form method="post" style="margin-top: 20px;">
+        <?php wp_nonce_field('cfm_archive_term', 'cfm_nonce'); ?>
+
+        <input type="hidden" name="cfm_action" value="archive_term">
+        <input type="hidden" name="framework_id" value="<?php echo esc_attr($framework->id); ?>">
+        <input type="hidden" name="term_uuid" value="<?php echo esc_attr($term['uuid'] ?? ''); ?>">
+
+        <?php submit_button('Archive Term', 'delete'); ?>
+      </form>
+    </div>
+  <?php
+  }
+
   public static function render_move_term_page(): void
   {
     if (!current_user_can('manage_options')) {
@@ -1045,6 +1263,12 @@ class CFM_Admin
       <?php if (isset($_GET['cfm_term_moved'])) : ?>
         <div class="notice notice-success is-dismissible">
           <p>Term moved.</p>
+        </div>
+      <?php endif; ?>
+
+      <?php if (isset($_GET['cfm_term_archived'])) : ?>
+        <div class="notice notice-success is-dismissible">
+          <p>Term archived from the active tree. Historical versions are unchanged.</p>
         </div>
       <?php endif; ?>
 
