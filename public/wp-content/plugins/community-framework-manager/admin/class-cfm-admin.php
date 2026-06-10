@@ -58,6 +58,11 @@ class CFM_Admin
       self::handle_archive_term();
       return;
     }
+
+    if ($action === 'restore_version') {
+      self::handle_restore_version();
+      return;
+    }
   }
 
   private static function handle_create_framework(): void
@@ -443,6 +448,56 @@ class CFM_Admin
     return false;
   }
 
+  private static function handle_restore_version(): void
+  {
+    check_admin_referer('cfm_restore_version', 'cfm_nonce');
+
+    $framework_id = absint($_POST['framework_id'] ?? 0);
+    $version_id = absint($_POST['version_id'] ?? 0);
+
+    if ($framework_id <= 0 || $version_id <= 0) {
+      wp_safe_redirect(
+        admin_url(
+          'admin.php?page=cfm-frameworks'
+            . '&action=versions'
+            . '&framework_id=' . $framework_id
+            . '&cfm_error=missing_restore_fields'
+        )
+      );
+      exit;
+    }
+
+    $framework = CFM_Framework_Repository::get_framework($framework_id);
+
+    if (!$framework) {
+      wp_die('Framework not found.');
+    }
+
+    $version = CFM_Framework_Repository::get_version((int) $framework->id, $version_id);
+
+    if (!$version) {
+      wp_die('Version not found.');
+    }
+
+    $tree = json_decode((string) $version->tree_json, true);
+
+    if (!is_array($tree)) {
+      wp_die('Stored tree JSON could not be decoded. Restore aborted.');
+    }
+
+    CFM_Framework_Repository::create_version((int) $framework->id, $tree, 'active');
+
+    wp_safe_redirect(
+      admin_url(
+        'admin.php?page=cfm-frameworks'
+          . '&action=edit'
+          . '&framework_id=' . (int) $framework->id
+          . '&cfm_version_restored=1'
+      )
+    );
+    exit;
+  }
+
   private static function get_framework_tree(object $framework): array
   {
     $version = CFM_Framework_Repository::get_active_version((int) $framework->id);
@@ -617,6 +672,11 @@ class CFM_Admin
 
     if ($action === 'archive_term') {
       self::render_archive_term_page();
+      return;
+    }
+
+    if ($action === 'restore_version') {
+      self::render_restore_version_page();
       return;
     }
 
@@ -799,6 +859,20 @@ class CFM_Admin
     );
   }
 
+  private static function restore_version_url(int $framework_id, int $version_id): string
+  {
+    return admin_url(
+      'admin.php?' . http_build_query(
+        [
+          'page' => 'cfm-frameworks',
+          'action' => 'restore_version',
+          'framework_id' => $framework_id,
+          'version_id' => $version_id,
+        ]
+      )
+    );
+  }
+
   public static function render_versions_page(): void
   {
     if (!current_user_can('manage_options')) {
@@ -974,6 +1048,14 @@ class CFM_Admin
         </tbody>
       </table>
 
+      <?php if (!$is_active_version && is_array($tree)) : ?>
+        <p style="margin-top: 16px;">
+          <a class="button button-primary" href="<?php echo esc_url(self::restore_version_url((int) $framework->id, (int) $version->id)); ?>">
+            Restore This Version
+          </a>
+        </p>
+      <?php endif; ?>
+
       <hr>
 
       <h2>Tree Snapshot</h2>
@@ -989,6 +1071,111 @@ class CFM_Admin
       <h2>Raw tree_json</h2>
 
       <textarea readonly class="large-text code" rows="24"><?php echo esc_textarea($pretty_json ?: (string) $version->tree_json); ?></textarea>
+    </div>
+  <?php
+  }
+
+  public static function render_restore_version_page(): void
+  {
+    if (!current_user_can('manage_options')) {
+      wp_die('You do not have permission to access this page.');
+    }
+
+    $framework_id = isset($_GET['framework_id'])
+      ? absint($_GET['framework_id'])
+      : 0;
+
+    $version_id = isset($_GET['version_id'])
+      ? absint($_GET['version_id'])
+      : 0;
+
+    $framework = CFM_Framework_Repository::get_framework($framework_id);
+
+    if (!$framework) {
+      wp_die('Framework not found.');
+    }
+
+    $version = CFM_Framework_Repository::get_version((int) $framework->id, $version_id);
+
+    if (!$version) {
+      wp_die('Version not found.');
+    }
+
+    $tree = json_decode((string) $version->tree_json, true);
+    $is_active_version = ((int) $framework->active_version_id === (int) $version->id);
+
+    if (!is_array($tree)) {
+      wp_die('Stored tree JSON could not be decoded. Restore is unavailable for this version.');
+    }
+
+  ?>
+    <div class="wrap">
+      <h1>
+        Restore Framework Version: <?php echo esc_html($framework->name); ?>
+        v<?php echo esc_html((string) $version->version_number); ?>
+      </h1>
+
+      <p>
+        <a href="<?php echo esc_url(
+                    admin_url(
+                      'admin.php?page=cfm-frameworks'
+                        . '&action=view_version'
+                        . '&framework_id=' . (int) $framework->id
+                        . '&version_id=' . (int) $version->id
+                    )
+                  ); ?>">← Back to Version Snapshot</a>
+        ·
+        <a href="<?php echo esc_url(self::versions_url((int) $framework->id)); ?>">Back to Version History</a>
+      </p>
+
+      <?php if ($is_active_version) : ?>
+        <div class="notice notice-info">
+          <p>This version is already active. No restore is needed.</p>
+        </div>
+      <?php else : ?>
+        <div class="notice notice-warning">
+          <p>
+            This will create a new active version copied from v<?php echo esc_html((string) $version->version_number); ?>.
+            The original version and all other historical versions will remain unchanged.
+          </p>
+        </div>
+      <?php endif; ?>
+
+      <table class="widefat striped" style="max-width: 900px;">
+        <tbody>
+          <tr>
+            <th style="width: 180px;">Framework</th>
+            <td><?php echo esc_html($framework->name); ?></td>
+          </tr>
+          <tr>
+            <th>Restore From</th>
+            <td>v<?php echo esc_html((string) $version->version_number); ?></td>
+          </tr>
+          <tr>
+            <th>Created</th>
+            <td><?php echo esc_html($version->created_at); ?></td>
+          </tr>
+          <tr>
+            <th>JSON Size</th>
+            <td><?php echo esc_html((string) strlen((string) $version->tree_json)); ?> bytes</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h2>Snapshot to Restore</h2>
+      <?php self::render_terms_recursive($tree['children'] ?? []); ?>
+
+      <?php if (!$is_active_version) : ?>
+        <form method="post" style="margin-top: 20px;">
+          <?php wp_nonce_field('cfm_restore_version', 'cfm_nonce'); ?>
+
+          <input type="hidden" name="cfm_action" value="restore_version">
+          <input type="hidden" name="framework_id" value="<?php echo esc_attr($framework->id); ?>">
+          <input type="hidden" name="version_id" value="<?php echo esc_attr($version->id); ?>">
+
+          <?php submit_button('Restore This Version', 'primary'); ?>
+        </form>
+      <?php endif; ?>
     </div>
   <?php
   }
@@ -1269,6 +1456,12 @@ class CFM_Admin
       <?php if (isset($_GET['cfm_term_archived'])) : ?>
         <div class="notice notice-success is-dismissible">
           <p>Term archived from the active tree. Historical versions are unchanged.</p>
+        </div>
+      <?php endif; ?>
+
+      <?php if (isset($_GET['cfm_version_restored'])) : ?>
+        <div class="notice notice-success is-dismissible">
+          <p>Framework version restored by creating a new active version.</p>
         </div>
       <?php endif; ?>
 
