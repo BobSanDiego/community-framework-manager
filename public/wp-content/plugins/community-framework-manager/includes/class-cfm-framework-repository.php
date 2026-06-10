@@ -124,14 +124,13 @@ class CFM_Framework_Repository
   {
     global $wpdb;
 
-    $frameworks_table = $wpdb->prefix . 'cfm_frameworks';
-    $versions_table   = $wpdb->prefix . 'cfm_framework_versions';
-
     $framework = self::get_framework($framework_id);
 
     if (!$framework || empty($framework->active_version_id)) {
       return null;
     }
+
+    $versions_table = $wpdb->prefix . 'cfm_framework_versions';
 
     $version = $wpdb->get_row(
       $wpdb->prepare(
