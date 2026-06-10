@@ -84,10 +84,23 @@ class CFM_Admin
       wp_die('You do not have permission to access this page.');
     }
 
+    $action = isset($_GET['action'])
+      ? sanitize_key(wp_unslash($_GET['action']))
+      : '';
+
+    if ($action === 'edit') {
+      self::render_framework_edit_page();
+      return;
+    }
+
     global $wpdb;
 
     $table = $wpdb->prefix . 'cfm_frameworks';
-    $frameworks = $wpdb->get_results("SELECT id, name, slug, description, active_version_id, created_at FROM {$table} ORDER BY id DESC");
+    $frameworks = $wpdb->get_results(
+      "SELECT id, name, slug, description, active_version_id, created_at
+             FROM {$table}
+             ORDER BY id DESC"
+    );
 
 ?>
     <div class="wrap">
@@ -104,6 +117,7 @@ class CFM_Admin
           <p>Name and slug are required.</p>
         </div>
       <?php endif; ?>
+
       <p>
         Create and manage reusable community classification frameworks.
         Examples: Teachers.Net profiles, Counsel.Net practice areas, BirdMart bird categories.
@@ -162,12 +176,13 @@ class CFM_Admin
             <th>Description</th>
             <th>Active Version</th>
             <th>Created</th>
+            <th>Actions</th>
           </tr>
         </thead>
         <tbody>
           <?php if (empty($frameworks)) : ?>
             <tr>
-              <td colspan="6">No frameworks created yet.</td>
+              <td colspan="7">No frameworks created yet.</td>
             </tr>
           <?php else : ?>
             <?php foreach ($frameworks as $framework) : ?>
@@ -178,11 +193,98 @@ class CFM_Admin
                 <td><?php echo esc_html($framework->description); ?></td>
                 <td><?php echo esc_html($framework->active_version_id ?: 'None'); ?></td>
                 <td><?php echo esc_html($framework->created_at); ?></td>
+                <td>
+                  <a href="<?php echo esc_url(add_query_arg(
+                              [
+                                'page' => 'cfm-frameworks',
+                                'action' => 'edit',
+                                'framework_id' => (int) $framework->id,
+                              ],
+                              admin_url('admin.php')
+                            )); ?>">
+                    Edit
+                  </a>
+                </td>
               </tr>
             <?php endforeach; ?>
           <?php endif; ?>
         </tbody>
       </table>
+    </div>
+  <?php
+  }
+
+  public static function render_framework_edit_page(): void
+  {
+    if (!current_user_can('manage_options')) {
+      wp_die('You do not have permission to access this page.');
+    }
+
+    global $wpdb;
+
+    $framework_id = isset($_GET['framework_id'])
+      ? absint($_GET['framework_id'])
+      : 0;
+
+    $table = $wpdb->prefix . 'cfm_frameworks';
+
+    $framework = $wpdb->get_row(
+      $wpdb->prepare(
+        "SELECT * FROM {$table} WHERE id = %d LIMIT 1",
+        $framework_id
+      )
+    );
+
+    if (!$framework) {
+      wp_die('Framework not found.');
+    }
+
+  ?>
+    <div class="wrap">
+      <h1>Edit Framework</h1>
+
+      <p>
+        <a href="<?php echo esc_url(admin_url('admin.php?page=cfm-frameworks')); ?>">
+          ← Back to Community Frameworks
+        </a>
+      </p>
+
+      <table class="widefat striped" style="max-width: 900px;">
+        <tbody>
+          <tr>
+            <th style="width: 180px;">ID</th>
+            <td><?php echo esc_html($framework->id); ?></td>
+          </tr>
+          <tr>
+            <th>Name</th>
+            <td><?php echo esc_html($framework->name); ?></td>
+          </tr>
+          <tr>
+            <th>Slug</th>
+            <td><code><?php echo esc_html($framework->slug); ?></code></td>
+          </tr>
+          <tr>
+            <th>Description</th>
+            <td><?php echo esc_html($framework->description); ?></td>
+          </tr>
+          <tr>
+            <th>Active Version</th>
+            <td><?php echo esc_html($framework->active_version_id ?: 'None'); ?></td>
+          </tr>
+        </tbody>
+      </table>
+
+      <hr>
+
+      <h2>Framework Tree</h2>
+
+      <p>
+        This is where axes and terms will be created and arranged.
+      </p>
+
+      <p>
+        Next step: add the first generic axis form.
+      </p>
     </div>
 <?php
   }
