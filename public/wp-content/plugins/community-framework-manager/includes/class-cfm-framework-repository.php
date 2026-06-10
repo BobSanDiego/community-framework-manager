@@ -217,4 +217,50 @@ class CFM_Framework_Repository
 
     return $version ?: null;
   }
+
+
+  public static function mark_version_compiled(int $framework_id, int $version_id, string $compiled_at): bool
+  {
+    global $wpdb;
+
+    $versions_table = $wpdb->prefix . 'cfm_framework_versions';
+
+    $updated = $wpdb->update(
+      $versions_table,
+      ['compiled_at' => $compiled_at],
+      [
+        'id' => $version_id,
+        'framework_id' => $framework_id,
+      ],
+      ['%s'],
+      ['%d', '%d']
+    );
+
+    return $updated !== false;
+  }
+
+  public static function get_compiled_counts(int $framework_id, int $version_id): array
+  {
+    global $wpdb;
+
+    $terms_table = $wpdb->prefix . 'cfm_terms_compiled';
+    $closure_table = $wpdb->prefix . 'cfm_term_closure';
+
+    return [
+      'terms' => (int) $wpdb->get_var(
+        $wpdb->prepare(
+          "SELECT COUNT(*) FROM {$terms_table} WHERE framework_id = %d AND version_id = %d",
+          $framework_id,
+          $version_id
+        )
+      ),
+      'closure' => (int) $wpdb->get_var(
+        $wpdb->prepare(
+          "SELECT COUNT(*) FROM {$closure_table} WHERE framework_id = %d AND version_id = %d",
+          $framework_id,
+          $version_id
+        )
+      ),
+    ];
+  }
 }

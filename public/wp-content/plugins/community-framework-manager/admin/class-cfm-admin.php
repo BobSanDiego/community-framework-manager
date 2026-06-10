@@ -63,6 +63,59 @@ class CFM_Admin
       self::handle_restore_version();
       return;
     }
+
+    if ($action === 'compile_active_version') {
+      self::handle_compile_active_version();
+      return;
+    }
+  }
+
+
+  private static function handle_compile_active_version(): void
+  {
+    check_admin_referer('cfm_compile_active_version', 'cfm_nonce');
+
+    $framework_id = absint($_POST['framework_id'] ?? 0);
+
+    if ($framework_id <= 0) {
+      wp_die('Missing framework ID.');
+    }
+
+    $framework = CFM_Framework_Repository::get_framework($framework_id);
+
+    if (!$framework) {
+      wp_die('Framework not found.');
+    }
+
+    $active_version = CFM_Framework_Repository::get_active_version($framework_id);
+
+    if (!$active_version) {
+      wp_safe_redirect(
+        admin_url(
+          'admin.php?page=cfm-frameworks'
+            . '&action=edit'
+            . '&framework_id=' . $framework_id
+            . '&cfm_error=no_active_version'
+        )
+      );
+      exit;
+    }
+
+    $result = CFM_Compiler::compile_version($framework_id, (int) $active_version->id);
+
+    $query_arg = !empty($result['success'])
+      ? '&cfm_compiled=1'
+      : '&cfm_error=compile_failed';
+
+    wp_safe_redirect(
+      admin_url(
+        'admin.php?page=cfm-frameworks'
+          . '&action=edit'
+          . '&framework_id=' . $framework_id
+          . $query_arg
+      )
+    );
+    exit;
   }
 
   private static function handle_create_framework(): void
@@ -1465,6 +1518,12 @@ class CFM_Admin
         </div>
       <?php endif; ?>
 
+      <?php if (isset($_GET['cfm_compiled'])) : ?>
+        <div class="notice notice-success is-dismissible">
+          <p>Active framework version compiled into query tables.</p>
+        </div>
+      <?php endif; ?>
+
       <?php if (isset($_GET['cfm_error']) && $_GET['cfm_error'] === 'missing_axis_fields') : ?>
         <div class="notice notice-error is-dismissible">
           <p>Axis label and slug are required.</p>
@@ -1481,6 +1540,18 @@ class CFM_Admin
       <?php if (isset($_GET['cfm_error']) && $_GET['cfm_error'] === 'missing_move_fields') : ?>
         <div class="notice notice-error is-dismissible">
           <p>Term and new parent are required.</p>
+        </div>
+      <?php endif; ?>
+
+      <?php if (isset($_GET['cfm_error']) && $_GET['cfm_error'] === 'no_active_version') : ?>
+        <div class="notice notice-error is-dismissible">
+          <p>No active version exists to compile.</p>
+        </div>
+      <?php endif; ?>
+
+      <?php if (isset($_GET['cfm_error']) && $_GET['cfm_error'] === 'compile_failed') : ?>
+        <div class="notice notice-error is-dismissible">
+          <p>Compile failed. Check tree_json and PHP error logs.</p>
         </div>
       <?php endif; ?>
 
@@ -1563,6 +1634,44 @@ class CFM_Admin
           View Full Version History
         </a>
       </p>
+
+      <hr>
+
+      <h2>Compiler</h2>
+
+      <?php $active_version = CFM_Framework_Repository::get_active_version((int) $framework->id); ?>
+      <?php if (!$active_version) : ?>
+        <p>No active version exists to compile.</p>
+      <?php else : ?>
+        <?php $compiled_counts = CFM_Framework_Repository::get_compiled_counts((int) $framework->id, (int) $active_version->id); ?>
+        <table class="widefat striped" style="max-width: 760px;">
+          <tbody>
+            <tr>
+              <th style="width: 180px;">Active Version</th>
+              <td>v<?php echo esc_html((string) $active_version->version_number); ?></td>
+            </tr>
+            <tr>
+              <th>Compiled At</th>
+              <td><?php echo esc_html($active_version->compiled_at ?: 'Not compiled'); ?></td>
+            </tr>
+            <tr>
+              <th>Compiled Terms</th>
+              <td><?php echo esc_html((string) $compiled_counts['terms']); ?></td>
+            </tr>
+            <tr>
+              <th>Closure Rows</th>
+              <td><?php echo esc_html((string) $compiled_counts['closure']); ?></td>
+            </tr>
+          </tbody>
+        </table>
+
+        <form method="post" style="margin-top: 12px;">
+          <?php wp_nonce_field('cfm_compile_active_version', 'cfm_nonce'); ?>
+          <input type="hidden" name="cfm_action" value="compile_active_version">
+          <input type="hidden" name="framework_id" value="<?php echo esc_attr($framework->id); ?>">
+          <?php submit_button('Compile Active Version', 'secondary', 'submit', false); ?>
+        </form>
+      <?php endif; ?>
 
       <hr>
 
