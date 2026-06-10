@@ -146,4 +146,75 @@ class CFM_Framework_Repository
 
     return $version ?: null;
   }
+
+  public static function get_versions(int $framework_id, int $limit = 0, int $offset = 0): array
+  {
+    global $wpdb;
+
+    $versions_table = $wpdb->prefix . 'cfm_framework_versions';
+    $limit = max(0, $limit);
+    $offset = max(0, $offset);
+
+    if ($limit > 0) {
+      $versions = $wpdb->get_results(
+        $wpdb->prepare(
+          "SELECT *
+             FROM {$versions_table}
+             WHERE framework_id = %d
+             ORDER BY version_number DESC
+             LIMIT %d OFFSET %d",
+          $framework_id,
+          $limit,
+          $offset
+        )
+      );
+    } else {
+      $versions = $wpdb->get_results(
+        $wpdb->prepare(
+          "SELECT *
+             FROM {$versions_table}
+             WHERE framework_id = %d
+             ORDER BY version_number DESC",
+          $framework_id
+        )
+      );
+    }
+
+    return is_array($versions) ? $versions : [];
+  }
+
+  public static function count_versions(int $framework_id): int
+  {
+    global $wpdb;
+
+    $versions_table = $wpdb->prefix . 'cfm_framework_versions';
+
+    return (int) $wpdb->get_var(
+      $wpdb->prepare(
+        "SELECT COUNT(*) FROM {$versions_table} WHERE framework_id = %d",
+        $framework_id
+      )
+    );
+  }
+
+  public static function get_version(int $framework_id, int $version_id): ?object
+  {
+    global $wpdb;
+
+    $versions_table = $wpdb->prefix . 'cfm_framework_versions';
+
+    $version = $wpdb->get_row(
+      $wpdb->prepare(
+        "SELECT *
+             FROM {$versions_table}
+             WHERE id = %d
+             AND framework_id = %d
+             LIMIT 1",
+        $version_id,
+        $framework_id
+      )
+    );
+
+    return $version ?: null;
+  }
 }
