@@ -103,4 +103,48 @@ class CFM_Framework_Repository
 
     return $version_id;
   }
+
+  public static function get_framework(int $framework_id): ?object
+  {
+    global $wpdb;
+
+    $table = $wpdb->prefix . 'cfm_frameworks';
+
+    $framework = $wpdb->get_row(
+      $wpdb->prepare(
+        "SELECT * FROM {$table} WHERE id = %d LIMIT 1",
+        $framework_id
+      )
+    );
+
+    return $framework ?: null;
+  }
+
+  public static function get_active_version(int $framework_id): ?object
+  {
+    global $wpdb;
+
+    $frameworks_table = $wpdb->prefix . 'cfm_frameworks';
+    $versions_table   = $wpdb->prefix . 'cfm_framework_versions';
+
+    $framework = self::get_framework($framework_id);
+
+    if (!$framework || empty($framework->active_version_id)) {
+      return null;
+    }
+
+    $version = $wpdb->get_row(
+      $wpdb->prepare(
+        "SELECT *
+             FROM {$versions_table}
+             WHERE id = %d
+             AND framework_id = %d
+             LIMIT 1",
+        (int) $framework->active_version_id,
+        $framework_id
+      )
+    );
+
+    return $version ?: null;
+  }
 }
