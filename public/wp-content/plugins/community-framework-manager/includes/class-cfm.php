@@ -238,31 +238,183 @@ class CFM
     );
   }
 
-  public static function matches(int $user_id, string $framework_slug, array $term_slugs_or_uuids, string $context = 'profile', bool $include_descendants = true): bool
+  public static function matches(...$args): bool
   {
-    $framework = self::get_framework($framework_slug);
+    // Backward-compatible v0.1.x signature:
+    // CFM::matches($user_id, $framework_slug, $term_slugs_or_uuids, $context, $include_descendants)
+    if (isset($args[0]) && is_int($args[0])) {
+      $user_id = (int) $args[0];
+      $framework_slug = isset($args[1]) ? (string) $args[1] : '';
+      $term_slugs_or_uuids = isset($args[2]) && is_array($args[2]) ? $args[2] : [];
+      $context = isset($args[3]) ? (string) $args[3] : 'profile';
+      $include_descendants = isset($args[4]) ? (bool) $args[4] : true;
 
-    if (!$framework) {
-      return false;
+      $framework = self::get_framework($framework_slug);
+
+      if (!$framework) {
+        return false;
+      }
+
+      $term_uuids = self::resolve_term_uuids((int) $framework->id, $term_slugs_or_uuids);
+
+      return CFM_Framework_Repository::user_matches_any_term(
+        $user_id,
+        (int) $framework->id,
+        $term_uuids,
+        $context,
+        $include_descendants
+      );
     }
 
-    $term_uuids = [];
+    // v0.2.0 audience matcher signature:
+    // CFM::matches($user_terms, $target_terms, $operator = 'AND')
+    $user_terms = isset($args[0]) && is_array($args[0]) ? $args[0] : [];
+    $target_terms = isset($args[1]) && is_array($args[1]) ? $args[1] : [];
+    $operator = isset($args[2]) ? strtoupper((string) $args[2]) : 'AND';
 
-    foreach ($term_slugs_or_uuids as $term_slug_or_uuid) {
-      $term_uuid = self::resolve_term_uuid((int) $framework->id, (string) $term_slug_or_uuid);
+    return self::term_arrays_match($user_terms, $target_terms, $operator);
+  }
 
-      if ($term_uuid !== '') {
-        $term_uuids[] = $term_uuid;
+  public static function find_users($args = [], string $operator = 'AND'): array
+  {
+    global $wpdb;
+
+    $defaults = [
+      'framework' => 'teachers-net',
+      'terms' => [],
+      'operator' => $operator,
+      'context' => 'profile',
+      'include_descendants' => true,
+      'fields' => 'ids',
+      'limit' => 0,
+      'offset' => 0,
+    ];
+
+    if (is_array($args) && isset($args['terms'])) {
+      $query = array_merge($defaults, $args);
+    } elseif (is_array($args)) {
+      $query = array_merge($defaults, ['terms' => $args]);
+    } else {
+      $query = $defaults;
+    }
+
+    $framework_slug = sanitize_title((string) $query['framework']);
+    $context = sanitize_key((string) $query['context']);
+    $match_operator = strtoupper((string) $query['operator']);
+    $include_descendants = (bool) $query['include_descendants'];
+    $fields = (string) $query['fields'];
+    $limit = max(0, (int) $query['limit']);
+    $offset = max(0, (int) $query['offset']);
+
+    if (!in_array($match_operator, ['AND', 'OR'], true)) {
+      $match_operator = 'AND';
+    }
+
+    $framework = self::get_framework($framework_slug);
+
+    if (!$framework || $context === '') {
+      return [];
+    }
+
+    $target_uuids = self::resolve_term_uuids((int) $framework->id, (array) $query['terms']);
+
+    if (empty($target_uuids)) {
+      return [];
+    }
+
+    $candidate_uuids = [];
+
+    foreach ($target_uuids as $target_uuid) {
+      $group = [$target_uuid];
+
+      if ($include_descendants) {
+        $group = CFM_Framework_Repository::get_descendant_uuids(
+          (int) $framework->id,
+          $target_uuid,
+          null,
+          true
+        );
+      }
+
+      $group = array_values(array_unique(array_filter(array_map('strval', $group))));
+
+      if (!empty($group)) {
+        $candidate_uuids[$target_uuid] = $group;
       }
     }
 
-    return CFM_Framework_Repository::user_matches_any_term(
-      $user_id,
-      (int) $framework->id,
-      $term_uuids,
-      $context,
-      $include_descendants
+    if (empty($candidate_uuids)) {
+      return [];
+    }
+
+    $all_matchable_uuids = array_values(array_unique(array_merge(...array_values($candidate_uuids))));
+
+    if (empty($all_matchable_uuids)) {
+      return [];
+    }
+
+    $user_terms_table = $wpdb->prefix . 'cfm_user_terms';
+    $placeholders = implode(',', array_fill(0, count($all_matchable_uuids), '%s'));
+    $params = array_merge([(int) $framework->id, $context], $all_matchable_uuids);
+
+    $rows = $wpdb->get_results(
+      $wpdb->prepare(
+        "SELECT DISTINCT user_id, term_uuid
+           FROM {$user_terms_table}
+           WHERE framework_id = %d
+           AND context = %s
+           AND term_uuid IN ({$placeholders})",
+        ...$params
+      )
     );
+
+    if (!is_array($rows) || empty($rows)) {
+      return [];
+    }
+
+    $matched_by_user = [];
+
+    foreach ($rows as $row) {
+      $user_id = (int) $row->user_id;
+      $assigned_uuid = (string) $row->term_uuid;
+
+      if ($user_id <= 0 || $assigned_uuid === '') {
+        continue;
+      }
+
+      if (!isset($matched_by_user[$user_id])) {
+        $matched_by_user[$user_id] = [];
+      }
+
+      foreach ($candidate_uuids as $target_uuid => $group) {
+        if (in_array($assigned_uuid, $group, true)) {
+          $matched_by_user[$user_id][$target_uuid] = true;
+        }
+      }
+    }
+
+    $required_count = count($candidate_uuids);
+    $matched_user_ids = [];
+
+    foreach ($matched_by_user as $user_id => $matched_targets) {
+      $matched_count = count($matched_targets);
+
+      if (($match_operator === 'OR' && $matched_count > 0) || ($match_operator === 'AND' && $matched_count === $required_count)) {
+        $matched_user_ids[] = (int) $user_id;
+      }
+    }
+
+    sort($matched_user_ids, SORT_NUMERIC);
+
+    if ($offset > 0 || $limit > 0) {
+      $matched_user_ids = array_slice($matched_user_ids, $offset, $limit > 0 ? $limit : null);
+    }
+
+    if ($fields === 'users') {
+      return array_values(array_filter(array_map('get_userdata', $matched_user_ids)));
+    }
+
+    return $matched_user_ids;
   }
 
   public static function register_assignment_admin_page(): void
@@ -284,12 +436,197 @@ class CFM
     );
 
     add_users_page(
+      'Audience Engine',
+      'Audience Engine',
+      'list_users',
+      'cfm-audience-engine',
+      [__CLASS__, 'render_audience_engine_admin_page']
+    );
+
+    add_users_page(
       'Profile Statistics',
       'Profile Statistics',
       'list_users',
       'cfm-profile-statistics',
       [__CLASS__, 'render_profile_statistics_admin_page']
     );
+  }
+
+  public static function render_audience_engine_admin_page(): void
+  {
+    if (!current_user_can('list_users')) {
+      wp_die('You do not have permission to use the Audience Engine.');
+    }
+
+    $frameworks = self::get_profile_frameworks();
+
+    echo '<div class="wrap">';
+    echo '<h1>Audience Engine</h1>';
+    echo '<p>Test audience definitions against assigned profile terms and inherited framework meaning.</p>';
+
+    if (empty($frameworks)) {
+      echo '<div class="notice notice-warning inline"><p>No compiled frameworks are available.</p></div>';
+      echo '</div>';
+      return;
+    }
+
+    $selected_framework_id = isset($_REQUEST['framework_id']) ? absint($_REQUEST['framework_id']) : (int) $frameworks[0]->id;
+
+    if (!self::framework_id_exists($frameworks, $selected_framework_id)) {
+      $selected_framework_id = (int) $frameworks[0]->id;
+    }
+
+    $selected_framework = CFM_Framework_Repository::get_framework($selected_framework_id);
+    $framework_slug = $selected_framework ? (string) $selected_framework->slug : '';
+    $terms_query_raw = isset($_REQUEST['terms']) ? sanitize_text_field(wp_unslash($_REQUEST['terms'])) : '';
+    $operator = isset($_REQUEST['operator']) ? strtoupper(sanitize_key(wp_unslash($_REQUEST['operator']))) : 'AND';
+    $limit = isset($_REQUEST['limit']) ? max(1, min(200, absint($_REQUEST['limit']))) : 50;
+
+    if (!in_array($operator, ['AND', 'OR'], true)) {
+      $operator = 'AND';
+    }
+
+    $target_terms = self::parse_term_query_list($terms_query_raw);
+
+    echo '<form method="get" action="">';
+    echo '<input type="hidden" name="page" value="cfm-audience-engine" />';
+    echo '<table class="form-table" role="presentation"><tbody>';
+
+    echo '<tr><th scope="row"><label for="cfm_audience_framework_id">Profile</label></th><td>';
+    echo '<select id="cfm_audience_framework_id" name="framework_id">';
+
+    foreach ($frameworks as $framework) {
+      echo '<option value="' . esc_attr((string) $framework->id) . '" ' . selected($selected_framework_id, (int) $framework->id, false) . '>' . esc_html($framework->name) . '</option>';
+    }
+
+    echo '</select></td></tr>';
+
+    echo '<tr><th scope="row"><label for="cfm_audience_terms">Audience terms</label></th><td>';
+    echo '<input type="text" id="cfm_audience_terms" name="terms" value="' . esc_attr($terms_query_raw) . '" class="regular-text" placeholder="Example: elementary, math" />';
+    echo '<p class="description">Enter term slugs or UUIDs, separated by commas or spaces. Matching includes descendants, so <code>elementary</code> includes users assigned child terms such as <code>grade-1</code>.</p>';
+    echo '</td></tr>';
+
+    echo '<tr><th scope="row"><label for="cfm_audience_operator">Operator</label></th><td>';
+    echo '<select id="cfm_audience_operator" name="operator">';
+    echo '<option value="AND" ' . selected($operator, 'AND', false) . '>AND — user must match every term</option>';
+    echo '<option value="OR" ' . selected($operator, 'OR', false) . '>OR — user may match any term</option>';
+    echo '</select></td></tr>';
+
+    echo '<tr><th scope="row"><label for="cfm_audience_limit">Limit</label></th><td>';
+    echo '<input type="number" id="cfm_audience_limit" name="limit" min="1" max="200" value="' . esc_attr((string) $limit) . '" class="small-text" />';
+    echo '<p class="description">Maximum users to display. The helper itself supports pagination through limit/offset arguments.</p>';
+    echo '</td></tr>';
+
+    echo '</tbody></table>';
+    submit_button('Find Users', 'primary', '', false);
+    echo ' <a class="button" href="' . esc_url(admin_url('users.php?page=cfm-audience-engine')) . '">Clear</a>';
+    echo '</form>';
+
+    echo '<hr />';
+    echo '<h2>Audience Query</h2>';
+    echo '<p><strong>Helper:</strong> <code>CFM::find_users()</code></p>';
+    echo '<pre style="max-width:760px;background:#fff;border:1px solid #ccd0d4;padding:12px;overflow:auto;">' . esc_html(self::format_audience_query_example($framework_slug, $target_terms, $operator, $limit)) . '</pre>';
+
+    if (!$selected_framework) {
+      echo '<div class="notice notice-error inline"><p>Invalid framework.</p></div>';
+      echo '</div>';
+      return;
+    }
+
+    if (empty($target_terms)) {
+      echo '<p>Enter one or more audience terms above, then run the query.</p>';
+      echo '</div>';
+      return;
+    }
+
+    $resolved_terms = [];
+    $missing_terms = [];
+
+    foreach ($target_terms as $target_term) {
+      $term_uuid = self::resolve_term_uuid((int) $selected_framework->id, $target_term);
+
+      if ($term_uuid === '') {
+        $missing_terms[] = $target_term;
+        continue;
+      }
+
+      $term = CFM_Framework_Repository::get_term_by_uuid((int) $selected_framework->id, $term_uuid);
+
+      if ($term) {
+        $resolved_terms[] = $term;
+      }
+    }
+
+    if (!empty($missing_terms)) {
+      echo '<div class="notice notice-warning inline"><p>Unresolved term(s): <code>' . esc_html(implode('</code>, <code>', $missing_terms)) . '</code>. These terms are ignored by the helper.</p></div>';
+    }
+
+    echo '<h2>Resolved Terms</h2>';
+
+    if (empty($resolved_terms)) {
+      echo '<p>No valid terms were resolved for this profile.</p>';
+      echo '</div>';
+      return;
+    }
+
+    echo '<table class="widefat striped" style="max-width:960px;"><thead><tr><th>Label</th><th>Slug</th><th>UUID</th><th>Matched Users</th></tr></thead><tbody>';
+
+    foreach ($resolved_terms as $term) {
+      $matched_count = self::count_users($framework_slug, (string) $term->slug, 'profile', true);
+      echo '<tr>';
+      echo '<td>' . esc_html((string) $term->label) . '</td>';
+      echo '<td><code>' . esc_html((string) $term->slug) . '</code></td>';
+      echo '<td><code>' . esc_html((string) $term->term_uuid) . '</code></td>';
+      echo '<td>' . esc_html((string) $matched_count) . '</td>';
+      echo '</tr>';
+    }
+
+    echo '</tbody></table>';
+
+    $matched_user_ids = self::find_users([
+      'framework' => $framework_slug,
+      'terms' => $target_terms,
+      'operator' => $operator,
+      'context' => 'profile',
+      'include_descendants' => true,
+      'fields' => 'ids',
+      'limit' => $limit,
+    ]);
+
+    echo '<h2>Matched Users</h2>';
+    echo '<p><strong>Matched user count shown:</strong> ' . esc_html((string) count($matched_user_ids)) . '</p>';
+
+    if (empty($matched_user_ids)) {
+      echo '<p>No users matched this audience definition.</p>';
+      echo '</div>';
+      return;
+    }
+
+    echo '<table class="widefat striped" style="max-width:960px;"><thead><tr><th>User</th><th>Email</th><th>Assigned Terms</th><th>Effective Terms</th></tr></thead><tbody>';
+
+    foreach ($matched_user_ids as $user_id) {
+      $user = get_userdata((int) $user_id);
+
+      if (!$user) {
+        continue;
+      }
+
+      $assigned_terms = self::get_user_terms((int) $user_id, $framework_slug);
+      $effective_terms = self::get_user_effective_terms((int) $user_id, $framework_slug);
+      $edit_url = get_edit_user_link((int) $user_id);
+      $user_label = $user->display_name ?: $user->user_login;
+
+      echo '<tr>';
+      echo '<td><a href="' . esc_url($edit_url) . '">' . esc_html($user_label) . '</a><br /><span class="description">ID: ' . esc_html((string) $user_id) . ' / ' . esc_html($user->user_login) . '</span></td>';
+      echo '<td>' . esc_html($user->user_email) . '</td>';
+      echo '<td>' . esc_html(self::format_term_labels($assigned_terms)) . '</td>';
+      echo '<td>' . esc_html(self::format_term_labels($effective_terms)) . '</td>';
+      echo '</tr>';
+    }
+
+    echo '</tbody></table>';
+    echo '<p class="description">This is a read-only test harness for audience computation. Assignment edits remain under Users → Framework Assignments.</p>';
+    echo '</div>';
   }
 
   public static function render_user_profile_terms(object $user): void
@@ -932,6 +1269,47 @@ class CFM
     echo '</div>';
   }
 
+  private static function parse_term_query_list(string $raw): array
+  {
+    $raw = trim($raw);
+
+    if ($raw === '') {
+      return [];
+    }
+
+    $parts = preg_split('/[\s,]+/', $raw);
+
+    if (!is_array($parts)) {
+      return [];
+    }
+
+    $terms = [];
+
+    foreach ($parts as $part) {
+      $part = trim((string) $part);
+
+      if ($part === '') {
+        continue;
+      }
+
+      $terms[] = wp_is_uuid($part) ? $part : sanitize_title($part);
+    }
+
+    return array_values(array_unique(array_filter($terms)));
+  }
+
+  private static function format_audience_query_example(string $framework_slug, array $target_terms, string $operator, int $limit): string
+  {
+    $terms = array_values(array_filter(array_map('strval', $target_terms)));
+
+    return "CFM::find_users([\n"
+      . "    'framework' => '" . $framework_slug . "',\n"
+      . "    'terms' => " . var_export($terms, true) . ",\n"
+      . "    'operator' => '" . $operator . "',\n"
+      . "    'limit' => " . $limit . ",\n"
+      . "]);";
+  }
+
   private static function get_assignment_candidate_users(string $search, int $selected_user_id = 0): array
   {
     $search = trim($search);
@@ -1137,6 +1515,44 @@ class CFM
     $walk('');
 
     return $ordered;
+  }
+
+  private static function resolve_term_uuids(int $framework_id, array $term_slugs_or_uuids): array
+  {
+    $term_uuids = [];
+
+    foreach ($term_slugs_or_uuids as $term_slug_or_uuid) {
+      $term_uuid = self::resolve_term_uuid($framework_id, (string) $term_slug_or_uuid);
+
+      if ($term_uuid !== '') {
+        $term_uuids[] = $term_uuid;
+      }
+    }
+
+    return array_values(array_unique(array_filter($term_uuids)));
+  }
+
+  private static function term_arrays_match(array $user_terms, array $target_terms, string $operator = 'AND'): bool
+  {
+    $user_terms = array_values(array_unique(array_filter(array_map('strval', $user_terms))));
+    $target_terms = array_values(array_unique(array_filter(array_map('strval', $target_terms))));
+    $operator = strtoupper($operator);
+
+    if (!in_array($operator, ['AND', 'OR'], true)) {
+      $operator = 'AND';
+    }
+
+    if (empty($user_terms) || empty($target_terms)) {
+      return false;
+    }
+
+    $matches = array_intersect($target_terms, $user_terms);
+
+    if ($operator === 'OR') {
+      return !empty($matches);
+    }
+
+    return count($matches) === count($target_terms);
   }
 
   private static function resolve_term_uuid(int $framework_id, string $term_slug_or_uuid): string
