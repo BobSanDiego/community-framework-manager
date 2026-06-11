@@ -274,6 +274,22 @@ class CFM
       'cfm-framework-assignments',
       [__CLASS__, 'render_assignment_admin_page']
     );
+
+    add_users_page(
+      'CFM Segmentation Tests',
+      'CFM Segmentation Tests',
+      'list_users',
+      'cfm-segmentation-tests',
+      [__CLASS__, 'render_segmentation_tests_admin_page']
+    );
+
+    add_users_page(
+      'Profile Statistics',
+      'Profile Statistics',
+      'list_users',
+      'cfm-profile-statistics',
+      [__CLASS__, 'render_profile_statistics_admin_page']
+    );
   }
 
   public static function render_user_profile_terms(object $user): void
@@ -322,6 +338,392 @@ class CFM
     }
 
     echo '</table>';
+  }
+
+  public static function render_segmentation_tests_admin_page(): void
+  {
+    if (!current_user_can('manage_options')) {
+      wp_die('You do not have permission to run segmentation tests.');
+    }
+
+    $frameworks = self::get_profile_frameworks();
+
+    echo '<div class="wrap">';
+    echo '<h1>CFM Segmentation Tests</h1>';
+    echo '<p>This page verifies assignment, inheritance, counts, and matching against compiled framework data.</p>';
+
+    if (empty($frameworks)) {
+      echo '<div class="notice notice-warning inline"><p>No compiled frameworks are available.</p></div>';
+      echo '</div>';
+      return;
+    }
+
+    $selected_framework_id = isset($_REQUEST['framework_id']) ? absint($_REQUEST['framework_id']) : (int) $frameworks[0]->id;
+    $selected_user_id = isset($_REQUEST['user_id']) ? absint($_REQUEST['user_id']) : 0;
+    $term_query = isset($_REQUEST['term_query']) ? sanitize_title(wp_unslash($_REQUEST['term_query'])) : '';
+    $user_search = isset($_REQUEST['user_search']) ? sanitize_text_field(wp_unslash($_REQUEST['user_search'])) : '';
+
+    if (!self::framework_id_exists($frameworks, $selected_framework_id)) {
+      $selected_framework_id = (int) $frameworks[0]->id;
+    }
+
+    $selected_framework = CFM_Framework_Repository::get_framework($selected_framework_id);
+    $selected_user = $selected_user_id > 0 ? get_userdata($selected_user_id) : false;
+    $framework_slug = $selected_framework ? (string) $selected_framework->slug : '';
+    $terms = $selected_framework ? self::order_terms_as_tree(CFM_Framework_Repository::get_compiled_terms($selected_framework_id)) : [];
+    $candidate_users = self::get_assignment_candidate_users($user_search, $selected_user_id);
+    $prechecked_user_id = $selected_user_id;
+
+    if ($prechecked_user_id <= 0 && count($candidate_users['users']) === 1 && !$candidate_users['too_many'] && !$candidate_users['too_short']) {
+      $prechecked_user_id = (int) $candidate_users['users'][0]->ID;
+    }
+
+    echo '<form method="get" action="">';
+    echo '<input type="hidden" name="page" value="cfm-segmentation-tests" />';
+    echo '<table class="form-table" role="presentation"><tbody>';
+    echo '<tr><th scope="row"><label for="cfm_seg_framework_id">Framework</label></th><td>';
+    echo '<select id="cfm_seg_framework_id" name="framework_id">';
+
+    foreach ($frameworks as $framework) {
+      echo '<option value="' . esc_attr((string) $framework->id) . '" ' . selected($selected_framework_id, (int) $framework->id, false) . '>' . esc_html($framework->name) . '</option>';
+    }
+
+    echo '</select></td></tr>';
+    echo '<tr><th scope="row"><label for="cfm_seg_user_search">Find user</label></th><td>';
+    echo '<input type="search" id="cfm_seg_user_search" name="user_search" value="' . esc_attr($user_search) . '" class="regular-text" placeholder="At least 3 characters, or exact email" /> ';
+    submit_button('Search Users', 'secondary', '', false);
+    echo ' <a class="button" href="' . esc_url(admin_url('users.php?page=cfm-segmentation-tests')) . '">Clear</a>';
+    echo '<p class="description">Select a user to inspect assigned and effective terms.</p>';
+    echo '</td></tr>';
+    echo '<tr><th scope="row">User</th><td>';
+
+    if ($candidate_users['too_short']) {
+      echo '<p class="description">Enter at least 3 characters, or search for an exact email address.</p>';
+    } elseif ($candidate_users['too_many']) {
+      echo '<div class="notice notice-warning inline"><p>More than 25 users matched. Refine the search.</p></div>';
+    } elseif (empty($candidate_users['users'])) {
+      echo '<p>No matching users selected.</p>';
+    } else {
+      echo '<fieldset style="max-width:760px;">';
+      echo '<legend class="screen-reader-text">Select user</legend>';
+
+      foreach ($candidate_users['users'] as $user) {
+        $label = sprintf('%s (%s)', $user->display_name ?: $user->user_login, $user->user_login);
+        echo '<label style="display:block;margin:8px 0;padding:10px 12px;background:#fff;border:1px solid #ccd0d4;">';
+        echo '<input type="radio" name="user_id" value="' . esc_attr((string) $user->ID) . '" ' . checked($prechecked_user_id, (int) $user->ID, false) . ' /> ';
+        echo '<strong>' . esc_html($label) . '</strong><br />';
+        echo '<span class="description">' . esc_html($user->user_email) . ' &nbsp; ID: ' . esc_html((string) $user->ID) . '</span>';
+        echo '</label>';
+      }
+
+      echo '</fieldset>';
+    }
+
+    echo '</td></tr>';
+    echo '<tr><th scope="row"><label for="cfm_seg_term_query">Test term</label></th><td>';
+    echo '<input type="text" id="cfm_seg_term_query" name="term_query" value="' . esc_attr($term_query) . '" class="regular-text" placeholder="Example: elementary, grade-1, math" />';
+    echo '<p class="description">Enter a term slug to test user matching and user counts.</p>';
+    echo '</td></tr>';
+    echo '</tbody></table>';
+    submit_button('Run Tests', 'primary', '', false);
+    echo '</form>';
+
+    if (!$selected_framework) {
+      echo '<div class="notice notice-error inline"><p>Invalid framework.</p></div>';
+      echo '</div>';
+      return;
+    }
+
+    echo '<hr />';
+    echo '<h2>Framework</h2>';
+    echo '<p><strong>' . esc_html((string) $selected_framework->name) . '</strong> <code>' . esc_html($framework_slug) . '</code></p>';
+
+    echo '<p class="description">Use Profile Statistics for population counts and distribution reports.</p>';
+
+    echo '<h2>User Term Resolution</h2>';
+    if ($selected_user_id <= 0 || !$selected_user) {
+      echo '<p>Select a user above, then run tests to inspect assignments.</p>';
+    } else {
+      $assigned_terms = self::get_user_terms($selected_user_id, $framework_slug);
+      $effective_terms = self::get_user_effective_terms($selected_user_id, $framework_slug);
+      $user_label = sprintf('%s (%s) — %s', $selected_user->display_name ?: $selected_user->user_login, $selected_user->user_login, $selected_user->user_email);
+
+      echo '<p><strong>User:</strong> ' . esc_html($user_label) . '</p>';
+      echo '<p><strong>Assigned terms:</strong> ' . esc_html(self::format_term_labels($assigned_terms)) . '</p>';
+      echo '<p><strong>Effective inherited terms:</strong> ' . esc_html(self::format_term_labels($effective_terms)) . '</p>';
+
+      if ($term_query !== '') {
+        $custom_term = self::get_term_by_slug($framework_slug, $term_query);
+        $custom_user_has = self::user_has_term($selected_user_id, $framework_slug, $term_query);
+        $custom_explicit_count = self::count_users($framework_slug, $term_query, 'profile', false);
+        $custom_effective_count = self::count_users($framework_slug, $term_query, 'profile', true);
+
+        echo '<h2>Custom Test Term Results</h2>';
+        echo '<p><strong>Test term:</strong> <code>' . esc_html($term_query) . '</code></p>';
+
+        if (!$custom_term) {
+          echo '<div class="notice notice-warning inline"><p>No compiled term with this slug exists in the selected framework. Counts and matching should be treated as invalid/zero.</p></div>';
+        }
+
+        echo '<table class="widefat striped" style="max-width:760px;"><thead><tr><th>Question</th><th>Result</th></tr></thead><tbody>';
+        echo '<tr><td>Selected user has this term? <code>user_has_term(' . esc_html((string) $selected_user_id) . ', ' . esc_html($framework_slug) . ', ' . esc_html($term_query) . ')</code></td><td><strong>' . esc_html($custom_user_has ? 'true' : 'false') . '</strong></td></tr>';
+        echo '<tr><td>Explicit user count</td><td><strong>' . esc_html((string) $custom_explicit_count) . '</strong></td></tr>';
+        echo '<tr><td>Descendant-aware user count</td><td><strong>' . esc_html((string) $custom_effective_count) . '</strong></td></tr>';
+        echo '</tbody></table>';
+      }
+
+      echo '<h2>Baseline Matching Checks</h2>';
+      echo '<table class="widefat striped" style="max-width:960px;"><thead><tr><th>Check</th><th>Result</th></tr></thead><tbody>';
+
+      $checks = [];
+      foreach (['grade-1', 'elementary', 'math'] as $slug) {
+        if (self::get_term_by_slug($framework_slug, $slug)) {
+          $checks[] = [
+            'label' => 'user_has_term(' . $selected_user_id . ', ' . $framework_slug . ', ' . $slug . ')',
+            'result' => self::user_has_term($selected_user_id, $framework_slug, $slug) ? 'true' : 'false',
+          ];
+        }
+      }
+
+      if (empty($checks)) {
+        echo '<tr><td colspan="2">No matching checks available for this framework yet.</td></tr>';
+      } else {
+        foreach ($checks as $check) {
+          $is_true = $check['result'] === 'true' || (is_numeric($check['result']) && (int) $check['result'] > 0);
+          echo '<tr>';
+          echo '<td><code>' . esc_html($check['label']) . '</code></td>';
+          echo '<td><strong>' . esc_html($check['result']) . '</strong> ' . ($is_true ? '<span style="color:#008a20;">PASS</span>' : '<span style="color:#8a1f11;">NONE/FALSE</span>') . '</td>';
+          echo '</tr>';
+        }
+      }
+
+      echo '</tbody></table>';
+    }
+
+    echo '<p class="description">This page reads compiled tables and helper APIs only. It does not modify assignments.</p>';
+    echo '</div>';
+  }
+
+  public static function render_profile_statistics_admin_page(): void
+  {
+    if (!current_user_can('list_users')) {
+      wp_die('You do not have permission to view profile statistics.');
+    }
+
+    $frameworks = self::get_profile_frameworks();
+
+    echo '<div class="wrap">';
+    echo '<h1>Community Profile Snapshot</h1>';
+    echo '<p>This page summarizes user profile composition across compiled Community Framework terms.</p>';
+
+    if (empty($frameworks)) {
+      echo '<div class="notice notice-warning inline"><p>No compiled frameworks are available.</p></div>';
+      echo '</div>';
+      return;
+    }
+
+    $selected_framework_id = isset($_GET['framework_id']) ? absint($_GET['framework_id']) : (int) $frameworks[0]->id;
+    $term_query = isset($_GET['term_query']) ? sanitize_title(wp_unslash($_GET['term_query'])) : '';
+    $sort = isset($_GET['sort']) ? sanitize_key(wp_unslash($_GET['sort'])) : 'tree';
+    $dir = isset($_GET['dir']) ? strtolower(sanitize_key(wp_unslash($_GET['dir']))) : 'asc';
+
+    if (!in_array($sort, ['tree', 'slug', 'users'], true)) {
+      $sort = 'tree';
+    }
+
+    if (!in_array($dir, ['asc', 'desc'], true)) {
+      $dir = 'asc';
+    }
+
+    if (!self::framework_id_exists($frameworks, $selected_framework_id)) {
+      $selected_framework_id = (int) $frameworks[0]->id;
+    }
+
+    $selected_framework = CFM_Framework_Repository::get_framework($selected_framework_id);
+
+    if (!$selected_framework) {
+      echo '<div class="notice notice-error inline"><p>Invalid framework.</p></div>';
+      echo '</div>';
+      return;
+    }
+
+    $framework_slug = (string) $selected_framework->slug;
+    $terms = self::order_terms_as_tree(CFM_Framework_Repository::get_compiled_terms($selected_framework_id));
+
+    echo '<form method="get" action="">';
+    echo '<input type="hidden" name="page" value="cfm-profile-statistics" />';
+    echo '<input type="hidden" name="sort" value="' . esc_attr($sort) . '" />';
+    echo '<input type="hidden" name="dir" value="' . esc_attr($dir) . '" />';
+    echo '<table class="form-table" role="presentation"><tbody>';
+    echo '<tr><th scope="row"><label for="cfm_stats_framework_id">Profile</label></th><td>';
+    echo '<select id="cfm_stats_framework_id" name="framework_id">';
+
+    foreach ($frameworks as $framework) {
+      echo '<option value="' . esc_attr((string) $framework->id) . '" ' . selected($selected_framework_id, (int) $framework->id, false) . '>' . esc_html($framework->name) . '</option>';
+    }
+
+    echo '</select></td></tr>';
+    echo '<tr><th scope="row"><label for="cfm_stats_term_query">Search term</label></th><td>';
+    echo '<input type="text" id="cfm_stats_term_query" name="term_query" value="' . esc_attr($term_query) . '" class="regular-text" placeholder="Example: elementary, grade-1, math" />';
+    echo '<p class="description">Optional. Enter a term slug to inspect audience size.</p>';
+    echo '</td></tr>';
+    echo '</tbody></table>';
+    submit_button('View Snapshot', 'primary', '', false);
+    echo '</form>';
+
+    echo '<hr />';
+    echo '<h2>Profiles</h2>';
+    echo '<p><strong>' . esc_html((string) $selected_framework->name) . '</strong> <code>' . esc_html($framework_slug) . '</code></p>';
+
+    if (empty($terms)) {
+      echo '<p>No compiled terms available.</p>';
+      echo '</div>';
+      return;
+    }
+
+    global $wpdb;
+    $users_table = $wpdb->users;
+    $user_terms_table = $wpdb->prefix . 'cfm_user_terms';
+
+    $total_users = (int) $wpdb->get_var("SELECT COUNT(ID) FROM {$users_table}");
+    $profiled_users = (int) $wpdb->get_var(
+      $wpdb->prepare(
+        "SELECT COUNT(DISTINCT user_id) FROM {$user_terms_table} WHERE framework_id = %d AND context = %s",
+        $selected_framework_id,
+        'profile'
+      )
+    );
+
+    $rows = [];
+    $axis_rows = [];
+
+    foreach ($terms as $term) {
+      $slug = (string) $term->slug;
+      $users_count = self::count_users($framework_slug, $slug, 'profile', true);
+      $pct = $profiled_users > 0 ? round(($users_count / $profiled_users) * 100, 1) : 0;
+
+      $row = [
+        'term' => $term,
+        'users_count' => $users_count,
+        'pct' => $pct,
+      ];
+
+      $rows[] = $row;
+
+      if ((int) $term->depth === 0) {
+        $axis_rows[] = $row;
+      }
+    }
+
+    echo '<p style="font-size:14px;line-height:1.7;margin-top:10px;">';
+    echo '<strong>Total Users:</strong> ' . esc_html((string) $total_users) . '<br />';
+    echo '<strong>Profile Categories:</strong> ' . esc_html((string) count($terms)) . '<br />';
+
+    foreach ($axis_rows as $axis_row) {
+      $axis_term = $axis_row['term'];
+      echo '<strong>' . esc_html((string) $axis_term->label) . ':</strong> ' . esc_html((string) $axis_row['users_count']) . ' users<br />';
+    }
+
+    echo '</p>';
+
+    $search_row = null;
+    $search_term = null;
+
+    if ($term_query !== '') {
+      $search_term = self::get_term_by_slug($framework_slug, $term_query);
+
+      if ($search_term) {
+        $users_count = self::count_users($framework_slug, $term_query, 'profile', true);
+        $pct = $profiled_users > 0 ? round(($users_count / $profiled_users) * 100, 1) : 0;
+        $search_row = [
+          'term' => $search_term,
+          'users_count' => $users_count,
+          'pct' => $pct,
+        ];
+      }
+    }
+
+    $display_rows = $rows;
+
+    if ($sort === 'slug') {
+      usort($display_rows, static function ($a, $b) use ($dir) {
+        $result = strcasecmp((string) $a['term']->slug, (string) $b['term']->slug);
+        return $dir === 'desc' ? -$result : $result;
+      });
+    } elseif ($sort === 'users') {
+      usort($display_rows, static function ($a, $b) use ($dir) {
+        $result = ((int) $a['users_count']) <=> ((int) $b['users_count']);
+        if ($result === 0) {
+          $result = strcasecmp((string) $a['term']->path, (string) $b['term']->path);
+        }
+        return $dir === 'desc' ? -$result : $result;
+      });
+    }
+
+    $base_args = [
+      'page' => 'cfm-profile-statistics',
+      'framework_id' => $selected_framework_id,
+    ];
+
+    if ($term_query !== '') {
+      $base_args['term_query'] = $term_query;
+    }
+
+    $tree_url = esc_url(add_query_arg($base_args, admin_url('users.php')));
+    $slug_dir = ($sort === 'slug' && $dir === 'asc') ? 'desc' : 'asc';
+    $users_dir = ($sort === 'users' && $dir === 'desc') ? 'asc' : 'desc';
+    $slug_url = esc_url(add_query_arg(array_merge($base_args, ['sort' => 'slug', 'dir' => $slug_dir]), admin_url('users.php')));
+    $users_url = esc_url(add_query_arg(array_merge($base_args, ['sort' => 'users', 'dir' => $users_dir]), admin_url('users.php')));
+
+    echo '<p class="description">User counts include inherited matches. Example: a user assigned to Grade 1 also counts under Elementary and Grade Level.</p>';
+
+    if ($term_query !== '' && !$search_term) {
+      echo '<div class="notice notice-warning inline"><p>No compiled term with slug <code>' . esc_html($term_query) . '</code> exists in this profile.</p></div>';
+    }
+
+    echo '<div style="max-height:620px;overflow:auto;border:1px solid #ccd0d4;background:#fff;max-width:1050px;">';
+    echo '<table class="widefat striped" style="border:0;">';
+    echo '<thead><tr>';
+    echo '<th><a href="' . $tree_url . '">Profile Category</a></th>';
+    echo '<th><a href="' . $slug_url . '">Slug</a></th>';
+    echo '<th><a href="' . $users_url . '">Users</a></th>';
+    echo '<th>%</th>';
+    echo '</tr></thead><tbody>';
+
+    if ($search_row) {
+      $term = $search_row['term'];
+      $indent = str_repeat('&mdash; ', max(0, (int) $term->depth));
+      echo '<tr style="background:#eaf3ff;font-weight:600;">';
+      echo '<td>Search: ' . wp_kses_post($indent) . esc_html((string) $term->label) . '</td>';
+      echo '<td><code>' . esc_html((string) $term->slug) . '</code></td>';
+      echo '<td>' . esc_html((string) $search_row['users_count']) . '</td>';
+      echo '<td>' . esc_html((string) $search_row['pct']) . '%</td>';
+      echo '</tr>';
+    }
+
+    if ($search_row) {
+      echo '<tr><td colspan="4" style="height:10px;background:#fff;border-top:1px solid #ccd0d4;border-bottom:1px solid #ccd0d4;"></td></tr>';
+    }
+
+    foreach ($display_rows as $row) {
+      $term = $row['term'];
+      $depth = (int) $term->depth;
+      $indent = $sort === 'tree' ? str_repeat('&mdash; ', max(0, $depth)) : '';
+      $is_axis = $depth === 0;
+
+      echo '<tr' . ($is_axis && $sort === 'tree' ? ' style="font-weight:600;"' : '') . '>';
+      echo '<td>' . wp_kses_post($indent) . esc_html((string) $term->label) . '</td>';
+      echo '<td><code>' . esc_html((string) $term->slug) . '</code></td>';
+      echo '<td>' . esc_html((string) $row['users_count']) . '</td>';
+      echo '<td>' . esc_html((string) $row['pct']) . '%</td>';
+      echo '</tr>';
+    }
+
+    echo '</tbody></table>';
+    echo '</div>';
+    echo '<p class="description">Click Profile Category to restore tree order. Slug sorts alphabetically. Users sorts by audience size. The highlighted search row stays pinned above the table.</p>';
+    echo '<p class="description">This page is analytics/read-only. Assignment changes still happen under Users → Framework Assignments.</p>';
+    echo '</div>';
   }
 
   public static function render_assignment_admin_page(): void
