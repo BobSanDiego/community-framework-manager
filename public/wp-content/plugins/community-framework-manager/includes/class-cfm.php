@@ -1124,13 +1124,17 @@ class CFM
     $user_search_too_many = (bool) $user_search_result['too_many'];
     $user_search_too_short = (bool) $user_search_result['too_short'];
 
-    // Do not auto-load assignments from search results.
-    // Even a single match should require the admin to click Load so the selected user is explicit.
-    $prechecked_user_id = $selected_user_id;
+    $matched_user_ids = array_map('intval', wp_list_pluck($users, 'ID'));
 
-    if ($prechecked_user_id <= 0 && count($users) === 1 && !$user_search_too_many && !$user_search_too_short) {
-      $prechecked_user_id = (int) $users[0]->ID;
+    if ($user_search !== '' && !$user_search_too_many && !$user_search_too_short) {
+      if (count($users) === 1) {
+        $selected_user_id = (int) $users[0]->ID;
+      } elseif ($selected_user_id > 0 && !in_array($selected_user_id, $matched_user_ids, true)) {
+        $selected_user_id = 0;
+      }
     }
+
+    $prechecked_user_id = $selected_user_id;
 
     $selected_framework = CFM_Framework_Repository::get_framework($selected_framework_id);
     $selected_user = $selected_user_id > 0 ? get_userdata($selected_user_id) : false;
@@ -1151,7 +1155,7 @@ class CFM
     echo '<input type="search" id="cfm_user_search" name="user_search" value="' . esc_attr($user_search) . '" class="regular-text" placeholder="At least 3 characters, or exact email" /> ';
     submit_button('Search', 'secondary', '', false);
     echo ' <a class="button" href="' . esc_url(admin_url('users.php?page=cfm-framework-assignments')) . '">Clear / New Search</a>';
-    echo '<p class="description">Search by login, email, or display name. Results are limited to 25 users. Select a user, then click Load.</p>';
+    echo '<p class="description">Search by login, email, or display name. Results are limited to 25 users. A single match loads automatically; multiple matches require selection.</p>';
     echo '</td></tr>';
 
     echo '<tr><th scope="row">User</th><td>';
@@ -1187,13 +1191,13 @@ class CFM
     }
 
     echo '</select> ';
-    submit_button('Load', 'secondary', '', false);
+    submit_button('Load Selected User', 'secondary', '', false);
     echo '</td></tr>';
     echo '</tbody></table>';
     echo '</form>';
 
     if ($selected_user_id <= 0) {
-      echo '<p>Select a user from the search results, then click Load to manage assignments.</p>';
+      echo '<p>Select a user from the search results, then click Load Selected User to manage assignments.</p>';
       echo '</div>';
       return;
     }
@@ -1204,14 +1208,12 @@ class CFM
       return;
     }
 
-    $managing_label = sprintf(
-      '%s (%s) — %s',
-      $selected_user->display_name ?: $selected_user->user_login,
-      $selected_user->user_login,
-      $selected_user->user_email
-    );
+    $selected_user_display = $selected_user->display_name ?: $selected_user->user_login;
 
-    echo '<div class="notice notice-info inline"><p><strong>Currently managing:</strong> ' . esc_html($managing_label) . ' / <strong>Framework:</strong> ' . esc_html((string) $selected_framework->name) . '</p></div>';
+    echo '<div class="notice notice-info inline"><p>';
+    echo 'User: <strong>' . esc_html($selected_user->user_login) . '</strong> ';
+    echo '<span class="description">(' . esc_html($selected_user_display) . ' / ' . esc_html($selected_user->user_email) . ')</span>';
+    echo '</p></div>';
     echo '<hr />';
     echo '<form method="post" action="' . esc_url(admin_url('users.php?page=cfm-framework-assignments')) . '">';
     wp_nonce_field('cfm_save_assignments', 'cfm_assignment_nonce');
@@ -1219,7 +1221,7 @@ class CFM
     echo '<input type="hidden" name="user_id" value="' . esc_attr((string) $selected_user_id) . '" />';
     echo '<input type="hidden" name="framework_id" value="' . esc_attr((string) $selected_framework_id) . '" />';
 
-    echo '<h2>' . esc_html($selected_framework ? $selected_framework->name : 'Framework') . '</h2>';
+    echo '<h2>' . esc_html(($selected_framework ? $selected_framework->name : 'Framework') . ' Assignments') . '</h2>';
 
     if (empty($terms)) {
       echo '<p>No compiled terms are available for this framework.</p>';
@@ -1352,7 +1354,10 @@ class CFM
       }
     }
 
-    if ($selected_user_id > 0) {
+    // Preserve the currently loaded user only when there is no active search.
+    // When a new search is active, do not inject the previously selected user
+    // into the result set; otherwise stale users appear and may remain loaded.
+    if ($search === '' && $selected_user_id > 0) {
       $selected_user = get_userdata($selected_user_id);
 
       if ($selected_user) {
