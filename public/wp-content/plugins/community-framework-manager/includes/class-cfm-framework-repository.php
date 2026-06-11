@@ -104,6 +104,22 @@ class CFM_Framework_Repository
     return $version_id;
   }
 
+
+  public static function get_frameworks(): array
+  {
+    global $wpdb;
+
+    $table = $wpdb->prefix . 'cfm_frameworks';
+
+    $frameworks = $wpdb->get_results(
+      "SELECT *
+         FROM {$table}
+         ORDER BY name ASC, id ASC"
+    );
+
+    return is_array($frameworks) ? $frameworks : [];
+  }
+
   public static function get_framework(int $framework_id): ?object
   {
     global $wpdb;
@@ -502,6 +518,216 @@ class CFM_Framework_Repository
 
     return is_array($siblings) ? $siblings : [];
   }
+
+
+  public static function get_user_term_uuids(int $user_id, int $framework_id, string $context = 'profile'): array
+  {
+    global $wpdb;
+
+    $user_id = max(0, $user_id);
+    $framework_id = max(0, $framework_id);
+    $context = sanitize_key($context);
+
+    if ($user_id <= 0 || $framework_id <= 0 || $context === '') {
+      return [];
+    }
+
+    $user_terms_table = $wpdb->prefix . 'cfm_user_terms';
+
+    $rows = $wpdb->get_col(
+      $wpdb->prepare(
+        "SELECT term_uuid
+           FROM {$user_terms_table}
+           WHERE user_id = %d
+           AND framework_id = %d
+           AND context = %s
+           ORDER BY id ASC",
+        $user_id,
+        $framework_id,
+        $context
+      )
+    );
+
+    return is_array($rows) ? array_values(array_map('strval', $rows)) : [];
+  }
+
+  public static function get_user_terms(int $user_id, int $framework_id, string $context = 'profile', ?int $version_id = null): array
+  {
+    $term_uuids = self::get_user_term_uuids($user_id, $framework_id, $context);
+
+    if (empty($term_uuids)) {
+      return [];
+    }
+
+    return self::get_terms_by_uuids($framework_id, $term_uuids, $version_id);
+  }
+
+  public static function set_user_terms(int $user_id, int $framework_id, array $term_uuids, string $context = 'profile'): bool
+  {
+    global $wpdb;
+
+    $user_id = max(0, $user_id);
+    $framework_id = max(0, $framework_id);
+    $context = sanitize_key($context);
+
+    if ($user_id <= 0 || $framework_id <= 0 || $context === '') {
+      return false;
+    }
+
+    $term_uuids = array_values(array_unique(array_filter(array_map('strval', $term_uuids))));
+
+    // Only store UUIDs that exist in the active compiled version.
+    if (!empty($term_uuids)) {
+      $valid_terms = self::get_terms_by_uuids($framework_id, $term_uuids);
+      $term_uuids = array_values(array_unique(array_map(
+        static fn($term): string => (string) $term->term_uuid,
+        $valid_terms
+      )));
+    }
+
+    $user_terms_table = $wpdb->prefix . 'cfm_user_terms';
+    $now = current_time('mysql');
+
+    $wpdb->query('START TRANSACTION');
+
+    $deleted = $wpdb->delete(
+      $user_terms_table,
+      [
+        'user_id' => $user_id,
+        'framework_id' => $framework_id,
+        'context' => $context,
+      ],
+      ['%d', '%d', '%s']
+    );
+
+    if ($deleted === false) {
+      $wpdb->query('ROLLBACK');
+      return false;
+    }
+
+    foreach ($term_uuids as $term_uuid) {
+      $inserted = $wpdb->insert(
+        $user_terms_table,
+        [
+          'user_id' => $user_id,
+          'framework_id' => $framework_id,
+          'term_uuid' => $term_uuid,
+          'context' => $context,
+          'created_at' => $now,
+        ],
+        ['%d', '%d', '%s', '%s', '%s']
+      );
+
+      if ($inserted === false) {
+        $wpdb->query('ROLLBACK');
+        return false;
+      }
+    }
+
+    $wpdb->query('COMMIT');
+
+    return true;
+  }
+
+  public static function user_has_term(int $user_id, int $framework_id, string $term_uuid, string $context = 'profile'): bool
+  {
+    global $wpdb;
+
+    $user_id = max(0, $user_id);
+    $framework_id = max(0, $framework_id);
+    $term_uuid = trim($term_uuid);
+    $context = sanitize_key($context);
+
+    if ($user_id <= 0 || $framework_id <= 0 || $term_uuid === '' || $context === '') {
+      return false;
+    }
+
+    $user_terms_table = $wpdb->prefix . 'cfm_user_terms';
+
+    $found = (int) $wpdb->get_var(
+      $wpdb->prepare(
+        "SELECT COUNT(*)
+           FROM {$user_terms_table}
+           WHERE user_id = %d
+           AND framework_id = %d
+           AND term_uuid = %s
+           AND context = %s",
+        $user_id,
+        $framework_id,
+        $term_uuid,
+        $context
+      )
+    );
+
+    return $found > 0;
+  }
+
+  public static function count_users_for_term(int $framework_id, string $term_uuid, string $context = 'profile', bool $include_descendants = true): int
+  {
+    global $wpdb;
+
+    $framework_id = max(0, $framework_id);
+    $term_uuid = trim($term_uuid);
+    $context = sanitize_key($context);
+
+    if ($framework_id <= 0 || $term_uuid === '' || $context === '') {
+      return 0;
+    }
+
+    $term_uuids = [$term_uuid];
+
+    if ($include_descendants) {
+      $term_uuids = self::get_descendant_uuids($framework_id, $term_uuid, null, true);
+    }
+
+    $term_uuids = array_values(array_unique(array_filter(array_map('strval', $term_uuids))));
+
+    if (empty($term_uuids)) {
+      return 0;
+    }
+
+    $user_terms_table = $wpdb->prefix . 'cfm_user_terms';
+    $placeholders = implode(',', array_fill(0, count($term_uuids), '%s'));
+
+    $params = array_merge([$framework_id, $context], $term_uuids);
+
+    return (int) $wpdb->get_var(
+      $wpdb->prepare(
+        "SELECT COUNT(DISTINCT user_id)
+           FROM {$user_terms_table}
+           WHERE framework_id = %d
+           AND context = %s
+           AND term_uuid IN ({$placeholders})",
+        ...$params
+      )
+    );
+  }
+
+  public static function user_matches_any_term(int $user_id, int $framework_id, array $term_uuids, string $context = 'profile', bool $include_descendants = false): bool
+  {
+    $user_terms = self::get_user_term_uuids($user_id, $framework_id, $context);
+    $term_uuids = array_values(array_unique(array_filter(array_map('strval', $term_uuids))));
+
+    if (empty($user_terms) || empty($term_uuids)) {
+      return false;
+    }
+
+    if ($include_descendants) {
+      $expanded = [];
+
+      foreach ($term_uuids as $term_uuid) {
+        $expanded = array_merge(
+          $expanded,
+          self::get_descendant_uuids($framework_id, $term_uuid, null, true)
+        );
+      }
+
+      $term_uuids = array_values(array_unique(array_filter(array_map('strval', $expanded))));
+    }
+
+    return count(array_intersect($user_terms, $term_uuids)) > 0;
+  }
+
 
   private static function get_active_version_id(int $framework_id): int
   {

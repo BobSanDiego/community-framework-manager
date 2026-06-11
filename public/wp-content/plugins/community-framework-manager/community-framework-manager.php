@@ -24,6 +24,7 @@ require_once CFM_PLUGIN_DIR . 'includes/class-cfm-activator.php';
 require_once CFM_PLUGIN_DIR . 'admin/class-cfm-admin.php';
 
 register_activation_hook(__FILE__, ['CFM_Activator', 'activate']);
+CFM::init();
 if (is_admin()) {
   CFM_Admin::init();
 }
